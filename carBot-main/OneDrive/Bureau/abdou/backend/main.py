@@ -14,9 +14,11 @@ import schemas
 import crud
 from database import engine, get_db
 from agent import process_message
+from seed_data import seed_database
 
-# Création des tables dans la base de données au démarrage
+# Création des tables et initialisation des données au démarrage
 models.Base.metadata.create_all(bind=engine)
+seed_database()
 
 app = FastAPI(
     title="API Gateway - Chatbot Automobile (IA Claude)", 
