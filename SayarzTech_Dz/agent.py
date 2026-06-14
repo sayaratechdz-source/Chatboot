@@ -305,7 +305,8 @@ async def process_message(user_message: str, session_id: str, image_b64=None, me
         _append_history(session_id, "assistant", reply)
         return reply, tools_triggered
     except Exception as e:
-        print(f"Erreur Gemini: {e}")
+        error_detail = str(e)
+        print(f"Erreur API: {error_detail}")
         if extra_context:
             return _clean(extra_context), tools_triggered
-        return "Desole, j ai un petit souci technique. Reessaie dans un instant!", tools_triggered
+        return f"Erreur API: {error_detail}", tools_triggered
