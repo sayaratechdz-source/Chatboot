@@ -1,24 +1,18 @@
 import os
 import re
-import random
 import time
 from typing import List, Tuple
-import httpx
+from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 from database import SessionLocal
 import models
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-def _get_gemini_url():
-    return f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+client = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 # Session history store
 _session_store: dict = {}
@@ -43,9 +37,8 @@ def _get_history(session_id: str) -> list:
 
 def _append_history(session_id: str, role: str, content: str):
     history = _get_history(session_id)
-    # Gemini uses "user" and "model" roles
-    gemini_role = "model" if role == "assistant" else "user"
-    history.append({"role": gemini_role, "parts": [{"text": content}]})
+    # Anthropic uses "user" and "assistant" roles
+    history.append({"role": role, "content": content})
     if len(history) > 20:
         _session_store[session_id]["messages"] = history[-20:]
 
@@ -69,17 +62,6 @@ vision_prompt = (
     "Reponds dans la langue du message de l utilisateur (francais, arabe, darija)."
 )
 
-_SOCIAL_KW = [
-    "salam", "bonjour", "bonsoir", "salut", "ahlan", "wach rak", "labas", "la bas",
-    "merci", "chokran", "barak allah", "shukran", "thank",
-    "bslama", "a bientot", "au revoir", "yallah bye", "bye", "ciao", "tchao",
-    "comment tu vas", "ca va", "kif rak", "kif nta",
-    "bravo", "t es fort", "bien joue", "chapeau", "excellent",
-    "nul", "inutile", "ca marche pas", "pas bien",
-    "qui es tu", "tu es qui", "c est quoi", "tu fais quoi",
-    "aide moi", "help", "aidez moi",
-]
-
 _VILLES_MAP = {
     "ain beida": "Aïn Beida", "beida": "Aïn Beida",
     "ain fakroun": "Aïn Fakroun", "fakroun": "Aïn Fakroun",
@@ -102,72 +84,39 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-async def _call_gemini(messages: list, system: str = "") -> str:
-    """Call OpenRouter API (compatible with OpenAI format)."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        # Convert Gemini-format messages to OpenAI format
-        openai_messages = []
-        if system:
-            openai_messages.append({"role": "system", "content": system})
-        for m in messages:
-            role = "assistant" if m["role"] == "model" else "user"
-            content = m["parts"][0]["text"] if "parts" in m else m.get("content", "")
-            openai_messages.append({"role": role, "content": content})
+async def _call_claude(messages: list, system: str = "") -> str:
+    """Call Anthropic Claude API."""
+    response = await client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        system=system,
+        messages=messages,
+    )
+    return response.content[0].text
 
-        payload = {
-            "model": OPENROUTER_MODEL,
-            "messages": openai_messages,
-            "max_tokens": 1024,
-            "temperature": 0.7,
+
+async def _call_claude_vision(image_b64: str, media_type: str, user_message: str) -> str:
+    """Call Anthropic Claude with image (vision)."""
+    content = []
+    if user_message.strip():
+        content.append({"type": "text", "text": user_message + "\n\n" + vision_prompt})
+    else:
+        content.append({"type": "text", "text": vision_prompt})
+    content.append({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": image_b64,
         }
+    })
 
-        resp = await client.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json; charset=utf-8",
-                "HTTP-Referer": "http://localhost:8000",
-                "X-Title": "SayaraTech Chatbot"
-            },
-            json=payload
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
-
-
-async def _call_gemini_vision(image_b64: str, media_type: str, user_message: str) -> str:
-    """Call OpenRouter Vision API with image."""
-    async with httpx.AsyncClient(timeout=30) as client:
-        content = []
-        if user_message.strip():
-            content.append({"type": "text", "text": user_message + "\n\n" + vision_prompt})
-        else:
-            content.append({"type": "text", "text": vision_prompt})
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{media_type};base64,{image_b64}"}
-        })
-
-        payload = {
-            "model": "meta-llama/llama-3.2-11b-vision-instruct:free",
-            "messages": [{"role": "user", "content": content}],
-            "max_tokens": 1024,
-        }
-
-        resp = await client.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json; charset=utf-8",
-                "HTTP-Referer": "http://localhost:8000",
-                "X-Title": "SayaraTech Chatbot"
-            },
-            json=payload
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+    response = await client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=1024,
+        messages=[{"role": "user", "content": content}],
+    )
+    return response.content[0].text
 
 
 def execute_tool(name: str, inputs: dict) -> str:
@@ -253,11 +202,11 @@ async def process_message(user_message: str, session_id: str, image_b64=None, me
     # Vision
     if image_b64:
         try:
-            reply = await _call_gemini_vision(image_b64, media_type or "image/jpeg", user_message)
+            reply = await _call_claude_vision(image_b64, media_type or "image/jpeg", user_message)
             reply = _clean(reply)
         except Exception as e:
-            print(f"Erreur vision Gemini: {e}")
-            reply = "Desole, je n ai pas pu analyser cette image."
+            print(f"Erreur vision Claude: {e}")
+            reply = f"Erreur vision: {str(e)}"
         _append_history(session_id, "user", user_message or "[image]")
         _append_history(session_id, "assistant", reply)
         return reply, ["vision_analysis"]
@@ -265,16 +214,17 @@ async def process_message(user_message: str, session_id: str, image_b64=None, me
     msg_lower = user_message.lower().strip()
     history = _get_history(session_id)
 
-    # Detect garage keywords
+    # Detect ville
     detected_ville = ""
     for key, val in _VILLES_MAP.items():
         if key in msg_lower:
             detected_ville = val
             break
 
+    # Detect garage keywords
     force_garage = any(kw in msg_lower for kw in _GARAGE_KW)
 
-    # If garage keyword, fetch from DB first then send to Gemini
+    # Fetch DB context if needed
     extra_context = ""
     if force_garage:
         tool_inputs = {"type_reparation": "", "ville": detected_ville}
@@ -291,22 +241,22 @@ async def process_message(user_message: str, session_id: str, image_b64=None, me
         extra_context += "\n" + execute_tool("urgence_panne", {"symptome_urgent": user_message})
         tools_triggered.append("urgence_panne")
 
-    # Build messages for Gemini
+    # Build Anthropic messages (user/assistant alternating)
     messages = list(history[-10:])
     user_content = user_message
     if extra_context:
         user_content = f"{user_message}\n\n[Donnees systeme: {extra_context}]"
-    messages.append({"role": "user", "parts": [{"text": user_content}]})
+    messages.append({"role": "user", "content": user_content})
 
     try:
-        raw = await _call_gemini(messages, system_prompt)
+        raw = await _call_claude(messages, system_prompt)
         reply = _clean(raw)
         _append_history(session_id, "user", user_message)
         _append_history(session_id, "assistant", reply)
         return reply, tools_triggered
     except Exception as e:
         error_detail = str(e)
-        print(f"Erreur API: {error_detail}")
+        print(f"Erreur Claude API: {error_detail}")
         if extra_context:
             return _clean(extra_context), tools_triggered
         return f"Erreur API: {error_detail}", tools_triggered
